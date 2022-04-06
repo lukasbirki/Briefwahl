@@ -1,0 +1,721 @@
+---
+title: "glimpse_gles_rolling"
+author: "Stefan Haussner"
+date: "26 11 2021"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+source("helpers.R")
+library(ggforce)
+library(ggpubr)
+library(ggtext)
+library(scales)
+library(tidyverse)
+library(haven)
+library(janitor)
+library(labelled)
+library(hrbrthemes)
+library(ggplot2)
+library(DescTools)
+
+theme_set(theme_minimal(base_size = 16))
+
+theme_update(plot.title.position = "plot",
+             plot.caption.position = "plot",
+             plot.subtitle = element_markdown(hjust = 0.5),
+             text=element_text(family="Times New Roman"),
+             plot.title = element_text(hjust = 0.5),
+            legend.position = "bottom",
+            legend.box = "horizontal",
+            strip.text = element_text(size = rel(1.25)))
+
+farbe_brief <- "#003366" #blau
+farbe_urne <- "#E31B23"  #rot
+```
+
+
+```{r}
+gles_rcs2017 <- haven::read_spss("../data/gles/ZA6803_v4-0-1_rollingcrosssection2017.sav")
+gles_pre2021 <- haven::read_dta("../data/gles/ZA7700_v1-0-0.dta")
+gles_rcs2021 <- haven::read_dta("../data/gles/ZA7703_v1-0-0_rolling_2021.dta")
+
+#Website: https://www.bundeswahlleiter.de/bundestagswahlen/2021/ergebnisse/weitere-ergebnisse.html
+ergebnisse_brief_urne <- read_csv2("https://www.bundeswahlleiter.de/dam/jcr/de996ffe-09b7-48a2-a24c-13b54a5935d4/btw21_ergebnisse_bezirksart_abs.csv", skip = 5) %>% 
+  clean_names() %>% 
+  mutate_at(.vars = vars(cdu:ubrige), .funs = ~.x/gultig*100)
+
+verlauf_zeit <- read.xlsx("/Users/lukas/Nextcloud/Für die Gruppe/Forschung-Nichtwähler/Election Results EU28/bt21_editedvolume/nonvoters-bt21-editedvolume/Briefwahl/data/briefwahlstimmen_zeit.xlsx")
+```
+
+Aufbau:
+
+#Anstieg Briefwahlanteile 1
+
+```{r}
+verlauf_zeit %>% 
+  mutate(Briefwahl = wert/100,
+         Urnenwahl = 1-Briefwahl) %>% 
+  pivot_longer(cols = c(Briefwahl,Urnenwahl )) %>% 
+  ggplot(aes(x = `jahr`, y = value, fill = name))+
+  geom_line(size = 1.2)+
+  geom_area()+
+  geom_hline(yintercept = 0.5)+
+  geom_point() +
+  labs(y = "Anteil an den Gesamtstimmen",
+       x = "Datum",
+       caption = "Daten: Bundeswahlleiter, 2021",
+       title = "Entwicklung der Brief- und Urnenwahlanteile von 1957-2021")+
+scale_y_continuous(breaks = c(0.25, 0.5, 0.75, 1), 
+                   labels = scales::percent_format(),
+                   limits = c(0, 1)) +
+  scale_fill_manual(name = "Stimmenanteile",
+                    values = c( farbe_brief,farbe_urne), )
+ggsave("../plots/Figure_1_Briefwahlhistorie_new.png", height = 6, width = 10, dpi = 300)
+
+
+```
+#Google Trends
+```{r}
+briefwahl_artikel <- read_rds('../data/briefwahl_artikel.rds')
+
+briefwahl_artikel %>% 
+  select(date, week, source) %>% 
+  group_by(week) %>% 
+  summarise(news_per_week = sum(!is.na(source))) %>% 
+  ggplot()+
+  geom_line(aes(x = week, y = news_per_week))+
+  geom_area(aes(x = week, y = news_per_week),fill = "#A6761D", alpha = 0.4) +
+  geom_point(aes(x = week, y = news_per_week))+
+      geom_vline(data = df_ereignisse, aes(xintercept = as.Date("2021-09-26")), colour="grey12", linetype = "longdash")+
+  geom_text(aes(x = as.Date('2021-10-8'), y = 28,
+                label = "Bundestagswahl \n 26.09.2021 "), family = "Times New Roman",
+            stat = "unique", lineheight = 0.9, size = 5 )+
+  geom_curve(aes(x = as.Date('2021-10-08'), y = 26, xend = as.Date('2021-09-27'), yend = 22),
+             curvature = -0.3, size = 0.3, color = "black",
+             arrow = arrow(length = unit(0.03, "npc")))+
+  labs(y = "Anzahl Artikel",
+       x = "Datum",
+       caption = "Aggregiert auf Wochenbasis; Suchwörter: `briefwahl bundestagswahl 2021` \n\n Daten: Google News",
+       title = "Anzahl der Artikel bei Google News zur Briefwahl",
+       subtitle = "Zeitraum: 21. Juli - 30. November 2021")+
+  scale_x_date(date_breaks = "1 month", 
+           date_labels="%d-%m")
+
+ggsave("../plots/Figure_2_Google_trends.png", device = "png", height = 7, width = 12, dpi = 300)
+```
+
+
+
+#Karte Europa und Briefwahl
+
+```{r}
+library(grid)
+library(rworldmap)
+
+data_maps <- read_csv2("../data/Overview_europa.csv")
+
+worldMap <- getMap()
+
+# Member States of the European Union
+europeanUnion <- c("Austria","Belgium","Bulgaria","Croatia",
+                   "Czech Rep.","Denmark","Estonia","Finland","France",
+                   "Germany","Greece","Hungary","Ireland","Italy","Latvia",
+                   "Lithuania","Luxembourg","Netherlands","Poland",
+                   "Portugal","Romania","Slovakia","Slovenia","Spain",
+                   "Sweden","United Kingdom")
+# Select only the index of states member of the E.U.
+indEU <- which(worldMap$NAME%in%europeanUnion)
+
+# Extract longitude and latitude border's coordinates of members states of E.U. 
+europeCoords <- lapply(indEU, function(i){
+  df <- data.frame(worldMap@polygons[[i]]@Polygons[[1]]@coords)
+  df$region =as.character(worldMap$NAME[i])
+  colnames(df) <- list("long", "lat", "region")
+  return(df)
+})
+
+europeCoords <- do.call("rbind", europeCoords)
+
+europeanUnionTable <- data.frame(country = europeanUnion)
+europeanUnionTable <-merge(europeanUnionTable,data_maps, by = c("country")) %>%
+  mutate(value = case_when(
+    (Online == 1) ~ "Onlinewahl verfügbar",
+    (Within == 0) & (Abroad == 0) ~ "Briefwahl nicht verfügbar",
+    (Within == 0) & (Abroad == 1) | (Within == 1) & (Abroad == 0) ~ "Briefwahl bedingt* verfügbar",
+    (Within == 1) & (Abroad == 1) ~ "Briefwahl im Inland und Ausland verfügbar"
+  ))
+
+europeCoords$value <- europeanUnionTable$value[match(europeCoords$region,europeanUnionTable$country)]
+```
+
+
+
+```{r}
+# Plot the map
+ggplot() + geom_polygon(data = europeCoords, aes(x = long, y = lat, group = region, fill = value), colour = "black", size = 0.2) +
+  coord_map(xlim = c(-15, 37),  ylim = c(32, 69)) +
+  scale_fill_manual(name = "Briefwahlsysteme",
+                    values = c("Briefwahl im Inland und Ausland verfügbar" = "#003366",
+                               "Briefwahl bedingt* verfügbar" = alpha("#003366",0.2) ,"Briefwahl nicht verfügbar" = "#E31B23","Onlinewahl verfügbar" ="#228B22"))+
+  labs(title = "Verfügbarkeit der Briefwahl in den EU-Mitgliedstaaten",
+       caption = "*Die Bedingungen an die Briefwahl unterscheiden sich teils stark den europäischen Ländern. \n Mögliche Gründe sind: im Ausland lebende Staatsangeörige, Soldaten/Beamte im Auslandsdienst, Strafgefangene, \n gesundheitliche Einschränkungen. Briefwahl nur für bestimmte Wahlen verfügbar; \nFür eine detaillierte Übersicht je Land, vgl. Lupiáñez-Villanueva und Devaux, 2018 \n \n Daten: Lupiáñez-Villanueva & Devaux, 2018")+
+  theme(title = element_text(size = 20),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(), axis.ticks.x = element_blank(),
+        axis.ticks.y = element_blank(), axis.title = element_blank(),
+        rect = element_blank(),
+        legend.position = "right",
+        plot.caption = element_text(size = 12, hjust = 1))
+
+ggsave("../plots/Figure_Karte.png", height = 8, width = 20, dpi = 300)
+
+```
+
+
+# Anteil Briefwahl an Gesamtstimmen
+
+```{r}
+#Datensatz generieren
+d_anteil_brief_an_gesamtstimmen <- ergebnisse_brief_urne %>% 
+  filter(stimmenart == "Z") %>% 
+  select(nr:wahler, -wahlberechtigte) %>% 
+  pivot_wider(values_from = "wahler", names_from = bezirksart) %>%
+  mutate_at(.vars = vars(Urne:Brief), .funs = ~.x/Zusammen*100) %>% 
+  mutate(land = fct_reorder(land, Brief), 
+         land = fct_relevel(land, "Bundesgebiet", after = 17)) %>% 
+  pivot_longer(Urne:Brief, values_to = "anteil")
+```
+
+```{r}
+ggplot(d_anteil_brief_an_gesamtstimmen %>% 
+         mutate(bund = ifelse(land == "Bundesgebiet", 1,2)))+
+  geom_bar(aes(x = land, y = anteil, fill = name), stat = "identity")+
+  geom_hline(yintercept = 50, linetype = "dotted", color = "grey20", size = 0.8) +
+  coord_flip()+
+  labs(y = "Anteil Brief- und Urnenwahlstimmen (%)",
+       x = NULL,
+       caption = "Daten: Bundeswahlleiter, 2021",
+       title = "Anteile Urnen- und Briefwähler je Bundesland")+
+  scale_fill_manual(name = NULL, values = c("Brief" = farbe_brief, "Urne" = farbe_urne))+
+  scale_x_discrete(
+    labels = c(
+      "Bundesgebiet" = expression(bold("Bundesgebiet")))) +
+  theme(plot.title = element_text(vjust = 2.5, hjust = 0.7)) 
+  
+
+ggsave("../plots/Figure_3_Anteile_Brief_Urnenstimmen.png", height = 7, width = 10, dpi = 300)
+```
+
+# Briefwahl und Parteiergebnis
+
+```{r}
+df %>% 
+  mutate(value = value*100) %>% 
+  filter(land == "Bundesgebiet") %>% 
+  ggplot(aes(x = name, y = value, fill = typ)) +
+  geom_bar(stat = "identity", position=position_dodge())+
+  geom_text(aes(label=round(value, digits = 1)), vjust= -0.3,  position = position_dodge(0.9),color="black",size=3.5)+
+  scale_fill_manual(name = NULL, values = c("Brief" = farbe_brief, "Urne" = farbe_urne))+
+  labs(x = "Parteiergebnis bei der Bundestagswahl 2021 (%)", y = NULL,
+       title = "Briefwahl und Parteiergebnis auf Bundesebene",
+              caption = "Daten: Bundeswahlleiter, 2021"
+       ) 
+
+ggsave("../plots/Figure_4_Ergebnisse_Bund.png", dpi = 300, height = 5, width = 10)
+```
+
+# Regional und Parteiergebniss
+
+```{r}
+d_parteiergebnisse_brief_urne <- ergebnisse_brief_urne %>%
+  mutate(andere = rowSums(select(., freie_wahler:ubrige), na.rm = TRUE),
+         cdu_csu = cdu+csu) %>% 
+  select(nr:gultig, cdu_csu, spd:grune, andere) %>%
+  pivot_longer(cdu_csu:andere) %>% select(-(wahlberechtigte:gultig)) %>% 
+  pivot_wider(names_from = bezirksart, values_from = c(value)) %>% 
+  mutate(name = fct_relevel(name, "cdu_csu", after = 6),
+         land = fct_relevel(land, "Bundesgebiet", after = 0),
+         land = fct_reorder(land, desc(land))) %>% 
+  ungroup()
+
+
+d_parteiergebnisse_brief_urne %>%
+  filter(stimmenart == "Z") %>%
+  mutate(color = case_when(Brief-Urne > 0 ~ "up",
+                           Brief-Urne < 0 ~ "down",
+                           Brief-Urne == 0 ~ "equal"),
+         name = fct_relevel(name, "cdu_csu", "spd", "grune", "fdp", "af_d", "die_linke", "andere"),
+         name = case_when(name == "cdu_csu" ~ "CDU/CSU",
+                          name == "spd" ~ "SPD",
+                          name == "grune" ~ "B90/Grüne",
+                          name == "fdp" ~ "FDP",
+                          name == "af_d" ~ "AfD",
+                          name == "die_linke" ~ "Die Linke",
+                          name == "andere" ~ "Andere"),
+         name = fct_relevel(name, "CDU/CSU", "SPD", "B90/Grüne", "FDP", "AfD", "Die Linke", "Andere")) %>% 
+  mutate_if(is.numeric, ~.x/100) %>%
+  pivot_longer(Zusammen:Brief, names_to = "typ") %>% 
+  filter(typ != "Zusammen") %>% 
+  filter(name != "Andere") -> df
+```
+
+```{r}
+df %>% 
+  filter(land != "Bundesgebiet") %>% 
+  ggplot()+
+  geom_path(aes(x = value, y = fct_relevel(land,
+                                            "Mecklenburg-Vorpommern", "Thüringen",
+                                            "Schleswig-Holstein", "Sachsen-Anhalt",
+                                            "Brandenburg", "Sachsen", "Berlin",
+                                           "Hamburg", "Bremen", "Niedersachsen", "Saarland",
+                                            "Rheinland-Pfalz", "Hessen", "Nordrhein-Westfalen",
+                                          "Baden-Württemberg","Bayern"), color = color), size = 2)+
+  geom_point(aes(x = value, y = land, fill = typ), shape = 21, size = 4)+
+  facet_wrap(~name, scales = "free_x", ncol = 3)+
+  scale_color_manual(name = NULL,
+                     values = c( "up" = farbe_brief,"down" = farbe_urne),
+                     label = c( "Brief > Urne","Brief < Urne"))+
+  scale_fill_manual(name = NULL, 
+                    label = c("Briefwahlergebnis", "Urnenwahlergebnis"),
+                    values = c("Brief" = farbe_brief, "Urne" = farbe_urne))+
+  scale_x_continuous(n.breaks = 3 )+
+  labs(x = "Parteiergebnis bei der Bundestagswahl 2021 in %", y = NULL,
+       title = "Briefwahl und Parteiergebnis Länderebene",
+       subtitle = "Stärkere Briefwahlergebnisse sind <b style='color:#003366;'>blau</b>, stärkere Urnenwahlergebnisse sind <b style='color:#E31B23;'>rot</b>",
+       caption = "Daten: Bundeswahlleiter, 2021") +
+  theme(axis.text.x = element_text(size = 15),
+        axis.text.y = element_text(size = 15)) +
+   annotate("segment", x=-Inf, xend=Inf, y=-Inf, yend=-Inf)+
+  annotate("segment", x=-Inf, xend=-Inf, y=-Inf, yend=Inf) +
+  theme(legend.direction = "vertical", legend.box = "horizontal")
+
+
+ggsave("../plots/Figure_5_Ergebnisse_Land.png", dpi = 300, height = 10, width = 10)
+```
+
+```{r}
+#Aufbereiung Daten
+
+drcs2021_prep_summarise <- gles_rcs2021 %>% 
+  select(lfdn, pre_startdatum, pre_feldtag, pre003, pre008ba) %>% 
+  mutate(var = 1,
+         pre008ba = labelled::to_factor(pre008ba), 
+         pre003 = to_factor(pre003)) %>% #Wahlentscheidung vor wahltermin (ja/nein)
+  pivot_wider(id_cols = lfdn:pre003,     #Wahlentscheidung (Partei)
+              names_from = pre008ba, values_from = var, values_fill = 0) %>%
+  clean_names() %>% 
+  mutate(brief = case_when(pre003 == "nein" ~ 0,
+                           pre003 == "ja" ~ 1,
+                           TRUE ~ NA_real_),
+         field_weeks = ggplot2::cut_width(pre_feldtag, width = 7))
+
+brief_zeit <- drcs2021_prep_summarise %>% 
+  group_by(field_weeks) %>% 
+  dplyr::summarise(brief = mean(brief, na.rm = TRUE),
+            n = n())
+
+parteien_zeit <- drcs2021_prep_summarise %>% 
+  filter(brief == 1) %>% 
+  group_by(field_weeks) %>% 
+  summarise_at(.vars = vars(cdu_csu:fdp, spd:die_linke, andere_partei),
+               .funs = list(mean = mean, 
+                            sd = sd),
+               na.rm = TRUE)
+```
+
+# Entwicklung Briefwahl über Zeit
+
+Wann erhalte ich meine Wahlbenachrichtigung?
+Etwa 4 bis 6 Wochen vor der Wahl versenden die Gemeindebehörden die Wahlbenachrichtigungen. Spätestens am 21. Tag vor der Wahl (= 5. September 2021) müssten Sie Ihre Wahlbenachrichtigung erhalten.
+http://www.gesetze-im-internet.de/bwo_1985/__19.html
+
+Grafik zeigt den Anteil der Befragten, die bereits per Briefwahl abgestimmt haben, bis zum Wahltag (in Wochen vor der Wahl.) 
+Ich erkenne jetzt nicht wirklich besondere Peaks etc. Relativ stetiger Anstieg bis auf knapp über 40%. An Kalles Frage bzgl. "Wie lange lagen die Unterlagen denn bei den Leuten" kommen wir so nicht richtig dran. Dazu müssten wir wissen, wann die verschickt worden sind.
+
+```{r}
+data.to.plot <- drcs2021_prep_summarise %>% 
+  filter(pre_startdatum > "2021-08-16") %>% 
+  drop_na(brief) %>% 
+  mutate(week = ggplot2::cut_width(pre_startdatum, 
+                                   width = 7,
+                                   closed = "left",
+                                   labels = c("2021-08-22",
+                                              "2021-08-29",
+                                              "2021-09-05",
+                                              "2021-09-12",
+                                              "2021-09-19",
+                                              "2021-09-25,"))) 
+
+table(data.to.plot$pre_startdatum, data.to.plot$week)
+
+data.to.plot %>% 
+  group_by(week) %>% 
+  summarize(briefwahl_week = sum(brief),
+            anzahl_week = n()) %>% 
+  mutate(anteil_woche = briefwahl_week/anzahl_week) %>% 
+  print(.$anteil_woche) -> xx
+
+
+diff(xx$anteil_woche)
+
+```
+
+```{r}
+data.to.plot %>% 
+  mutate(date = as.Date(week)) %>% 
+  nest(drcs2021_prep_summarise = -"date") %>%
+  mutate(ci = map(drcs2021_prep_summarise, ~ MeanCI(.x$brief))) %>% 
+  unnest_wider(ci) %>% 
+  add_row(date = as.Date("2021-09-26"), mean = 0.47)-> df_briefwahl_zeit
+
+df_briefwahl_zeit %>% 
+  filter(mean != 0.47) %>% 
+  ggplot(aes(x = date, y = mean, group = 1))+
+  geom_line(color = farbe_brief)+
+      geom_line(data= df_briefwahl_zeit %>% filter(date == as.Date("2021-09-25") | date == as.Date("2021-09-26")), aes(x = date, y = mean), lwd=1.5, lty="11", color = "grey") +
+  geom_point() +
+  geom_ribbon(aes(ymin=lwr.ci,ymax=upr.ci), fill = farbe_brief, alpha=0.3) +
+  geom_point(data = df_briefwahl_zeit %>% filter(mean == 0.47), aes(x = date, y = mean), shape=4, size = 3) +
+  #Label Eintragung Wahlberechtigten 15.08
+  geom_text(aes(x =as.Date('2021-08-25'), y = 0.10,
+                label = "Versandstart \n Wahlbenachrichtigungen \n ab 15.08.21"), family = "Times New Roman",
+            stat = "unique", lineheight = 0.9, size = 5) +
+  geom_curve(aes(x = as.Date('2021-08-24'), y = 0.07, xend = as.Date('2021-08-22'), yend = 0.055),
+             curvature = -0.3, size = 0.3, color = "black",
+             arrow = arrow(length = unit(0.03, "npc")))+
+  #Label Versand Wahlbenachritigung
+  geom_text(aes(x =as.Date('2021-09-03'), y = 0.20, 
+                label = "Versandfrist \nWahlbenachrichtigung \n 05.09.21"), family = "Times New Roman",
+            stat = "unique", lineheight = 0.9, size = 5) +
+  geom_curve(aes(x = as.Date('2021-09-3'), y = 0.16, xend = as.Date('2021-09-4'), yend = 0.12),
+             curvature = 0.3, size = 0.3, color = "black",
+             arrow = arrow(length = unit(0.03, "npc")))+
+  #Label wahltag
+  geom_text(aes(x = as.Date('2021-09-19'), y = 0.45,
+                label = "Bundestagswahl \nAnteil Briefwähler = 47.3%\n 26.09.2021 "), family = "Times New Roman",
+            stat = "unique", lineheight = 0.9, size = 5 )+
+  geom_curve(aes(x = as.Date('2021-09-22'), y = 0.46, xend = as.Date('2021-09-25'), yend = 0.47),
+             curvature = -0.1, size = 0.3, color = "black",
+             arrow = arrow(length = unit(0.03, "npc")))+
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(title = "Geschätzter Anteil der Briefwähler bis zur Bundestagswahl 2021",
+       caption = "Daten: GLES, 2021",
+       subtitle = "Schätzung auf Wochenbasis inkl. 95%-Konfidenzintervalle",
+       x = "Datum", y = "Anteil Briefwähler")
+  
+ggsave("../plots/Figure_6_Briefwahl_Zeit.png", dpi = 300, height = 7, width = 10)
+  
+```
+
+## Ereignisse Wahlkampf
+
+```{r}
+
+#Data Generation
+df_ereignisse <- data.frame(Ereigniss = c("SPD überholt CDU in Umfragen",
+                                          "Vorstellung Expertenteam CDU",
+                                          "Razzia Finanzministerium",
+                                          "Triell II - ARD/ZDF",
+                                          "Triell III - Prosieben/Sat1",
+                                          "Wahltag"
+                                          ),
+                            date = c("2021-08-28",
+                                     "2021-09-03",
+                                     "2021-09-09",
+                                     "2021-09-12",
+                                     "2021-09-19",
+                                     "2021-09-26"),
+                            label = c("28.August",
+                                      "03.September",
+                                      "09.September",
+                                      "12.September",
+                                      "19.September",
+                                      "26. September")
+                            ) %>% 
+  mutate(label_final = paste(Ereigniss, "\n", label))
+
+read_delim("../data/dawum.de_Bundestag_2022-01-20.csv", delim = ";") %>% 
+  mutate(across(`CDU/CSU`:`Sonstige`, ~ .x /10)) %>% 
+  mutate(Datum = lubridate::dmy(Datum)) %>% 
+  filter(as.Date(Datum) >= "2021-08-23" & as.Date(Datum) <= "2021-09-26") %>% 
+  select(-`Sonstige`) %>% 
+  pivot_longer(`CDU/CSU`:`AfD`,
+               names_to = "Party",
+               values_to = "Prognose") -> df_prognosen
+
+#Plots
+
+ggplot()+
+  
+  geom_vline(data = df_ereignisse, aes(xintercept = as.Date(date)), colour="grey", linetype = "longdash")+
+  
+  geom_label(data = df_ereignisse, aes(x = as.Date(date), y = c(27, 32, 28.7, 33,29, 32.5), label = label_final), label.size = 0.1, size = 3, fontface="bold")+
+  
+  geom_line(data= df_prognosen %>% filter(Datum <= as.Date("2021-09-24")), aes(x = Datum, y = Prognose, color = Party),
+            lwd=1.5) +
+  
+  scale_color_manual(name="Parteiprognosen", values = c("SPD" = "#FF0000",
+                                              "CDU/CSU" = "#000000",
+                                              "Grüne" = "#64a12d",
+                                              "FDP" = "#ffed00",
+                                               "AfD" = "#009ee0",
+                               "Linke" = "#BE3075"
+                                ))+
+  
+  geom_line(data= df_prognosen %>% filter(Datum >= as.Date("2021-09-24")), aes(x = Datum, y = Prognose, group = Party), lwd=1.5, lty="11", color = "grey") +
+  
+  geom_point(data = df_prognosen[169:174,], aes(x = Datum, y = Prognose, fill = "Date"), shape=4, size = 3) +
+  
+  scale_fill_manual(name="BTW 2021",
+                    values = c("Endgültiges Ergebnis" = "black"))+
+  
+  scale_y_continuous(limits = c(4.5, 35), 
+                     breaks = c(5.5, 10, 15, 20, 25, 30, 35),
+                     labels = scales::percent_format(scale = 1, accuracy = 1)) +
+  
+  scale_x_date(date_breaks = "1 week", 
+           limits = c(as.Date('2021-08-22'), as.Date('2021-09-26')),
+           date_labels="%d-%m") +
+  labs(y = "Anteil Parteien (Progonsen)",
+       caption = "Briefwahlprognosen aggregiert auf Wochenbasis. Parteiprognosen als Durchschnittswere der Wahlumfragen \nDie Werte am Wahltag (26. September) stellen a) den finalen Briefwahlanteil und b) die finalen Parteiergebnisse dar \n\nDaten: GLES, 2021 & Dawum, 2021")+
+  theme(axis.title.x=element_blank(),
+        axis.text.x = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())+
+  guides(fill = guide_legend(title.position = 'top', order = 2),
+         colour = guide_legend(title.position = 'top', order = 1)) -> p1
+
+
+  df_briefwahl_zeit %>% 
+    ggplot(aes(x = date, y = mean))+
+    geom_vline(data = df_ereignisse, aes(xintercept = as.Date(date)), colour="grey", linetype = "longdash")+
+    
+    geom_area(data = (df_briefwahl_zeit %>% filter(date <= as.Date("2021-09-25"))), fill = farbe_brief, colour = farbe_brief,alpha = 0.3) +
+    
+    geom_area(data = (df_briefwahl_zeit %>% filter(date >= as.Date("2021-09-25"))), fill = "grey", colour = "grey",alpha = 0.5) +
+  
+    geom_segment(aes(x=as.Date("2021-08-22"),xend=as.Date("2021-09-26"),y=0.473,yend=0.473),colour = "grey")+
+    
+    geom_point(data = df_briefwahl_zeit[7,], aes(date, mean),
+               colour="black", fill = "white", shape=21, size = 1.5) +
+    
+    annotate("text", x = as.Date("2021-09-19"), y = .52, label = "Anteil Briefwahlstimmen am Wahltag = 47.7%", family = "Times New Roman", size = 4, colour = "grey28")+
+  scale_x_date(date_breaks = "1 week", 
+           limits = c(as.Date('2021-08-22'), as.Date('2021-09-26')),
+           date_labels="%d-%m")+
+  scale_y_continuous(limits = c(0, 0.55), 
+                     breaks = c(0, 0.25, 0.50),
+                     labels = scales::percent_format(scale = 100)) +
+  labs(y = "Briefwähler") +
+  theme(legend.position="right",
+        axis.title.x=element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        plot.background = element_blank())-> p2
+
+plot<- ggarrange(p2,p1,
+                 ncol=1, nrow=2, 
+                 common.legend = TRUE,
+                 legend="bottom", heights = c(2,5)) +
+    theme(plot.margin = margin(0.75,0.1,2,0.1, "cm")) 
+
+
+annotate_figure(plot, top = ggpubr::text_grob(label = "Zeitliche Dynamiken - Wahlkampf und Briefwahlanteile", size = 24, family= "Times New Roman", lineheight = 10))
+
+ggsave( "../plots/Figure_7_Briefwahl_Zeit_inkl._Wahlkampf.png", dpi = 300, height = 10, width = 10)
+  
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<!-- # Nur Paper: Wer sind die Briefähler? -->
+<!-- ## Charackteristiken und Anteile Briefwahl -->
+
+<!-- Hier wurden die relativen Anteile der Briefwähler gegen individuelle Charackteristiken geplottet. @Stefan hier würde ich gerne mit dir nochmal überlegen, welche der oben genannten Variablen am meisten Sinn machen! -->
+
+<!-- Datenerhebungsraum: 26.08.2021 bis 25.09.2021 -->
+
+<!-- ```{r} -->
+<!-- gles_pre2021 %>%  -->
+<!--   dplyr::select( -->
+<!--   q6, #Wie wahrscheinlich ist es, dass Sie am 26. September 2021 zur Bundestagswahl gehen?   -->
+<!--   q4, #Zufriedenheit Demokratie -->
+<!--   q99, #Wahlbeteiligung Nachbarschaft -->
+<!--   q11, #Sicherheit Wahlabsicht  -->
+<!--   d38, #Eigene Schichtwahrnehmung -->
+<!--   q37, #LR-Einstellung -->
+<!--   d63, #HH-Nettoeinkommen -->
+<!--   q38f, #Angst Ansteckung Corona -->
+<!--   starts_with("q10"), #Wahlabsicht Briefwahl (Erst und Zweitstimme) -->
+<!--   starts_with("q12") # Vertrauen in Wahl (ua. Briefwahl) -->
+<!--   ) -> gles_df  -->
+
+<!-- gles_df %>%  -->
+<!--   filter(q6 == 6) -> df_briefwahl #Filter, wenn Briefwahl -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- gles_df %>%  -->
+<!--   mutate(briefwahl = case_when( -->
+<!--   q6 == 6 ~ 1, T ~ 0)) %>%  -->
+<!--   group_by(q38f, briefwahl) %>% -->
+<!--   count() %>% group_by(q38f) %>%  -->
+<!--   mutate(summe = sum(n), -->
+<!--          share = n/summe) %>% ungroup() %>%  -->
+<!--   filter((briefwahl == 1) & (q38f >= 1)) %>%  -->
+<!--   ggplot(aes(x = as.factor(q38f), y = share)) + -->
+<!--   geom_col(fill="#69b3a2") +  -->
+<!--   labs(title = "Angst vor Corona und Anteil Briefwähler:innen", -->
+<!--        x = "Angst vor Corona-Pandemie", y = "Anteil Briefwähler (in Prozent)") + -->
+<!--   theme_ipsum() + -->
+<!--   theme(title = element_text(hjust = 0.5)) -> p1 -->
+
+<!-- gles_df %>%  -->
+<!--   mutate(briefwahl = case_when( -->
+<!--   q6 == 6 ~ 1, T ~ 0)) %>%  -->
+<!--   group_by(q12c, briefwahl) %>% -->
+<!--   count() %>% group_by(q12c) %>%  -->
+<!--   mutate(summe = sum(n), -->
+<!--          share = n/summe) %>% ungroup() %>%  -->
+<!--   filter((briefwahl == 1) & (q12c >= 1)) %>%  -->
+<!--   mutate(vertrauen = 6 - q12c) %>%  -->
+<!--   ggplot(aes(x = as.factor(vertrauen), y = share)) + -->
+<!--   geom_col(fill="#92C5DE") +  -->
+<!--   labs(title = "Vertrauen in Briefwahl und Anteil Briefwähler:innen", -->
+<!--        x = "Vertrauen in Briefwahl", y = "Anteil Briefwähler (in Prozent)") + -->
+<!--   theme_ipsum() + -->
+<!--   theme(title = element_text(hjust = 0.5)) -> p2 -->
+
+<!-- library(patchwork) -->
+<!-- p1 + p2 + plot_layout(ncol = 1) -> p3 -->
+<!-- ggsave("../plots/Anteil_Briefwähler.png", dpi = 300, height = 8, width = 6) -->
+
+<!-- ``` -->
+
+<!-- ## Wahlergebnisse Briefwahl -->
+
+<!-- Mh also bezuuuüglich der Wahlprognose ist der Mehrwert marginal. Man könnte hier evtl. noch die Differenz der Briefwahlprognose mit den allgemeinen Wahlprognosen plotten.  -->
+
+<!-- ```{r} -->
+<!-- df_briefwahl %>%  -->
+<!--   filter(q10ba %in% c(1,4,5,6,6,7, 322)) %>%  -->
+<!--   mutate(partei = haven::as_factor(q10ba), -->
+<!--          n_gesamt = n()) %>%  -->
+<!--   group_by(q10ba) %>%  -->
+<!--   mutate(share_party = n()/n_gesamt) %>% ungroup() %>% select(share_party, partei) %>% unique() %>%  -->
+<!--   ggplot() + -->
+<!--   geom_bar(aes(x = partei, y = share_party, fill = partei), stat = "identity") +  -->
+<!--   scale_fill_manual(breaks = c("CDU/CSU", "DIE LINKE", "FDP", "AfD", "GRUENE", "SPD"),  -->
+<!--                     values=c("#000000", "#BE3075", "#FFFF00",  "#009EE0",  "#64A12D","#FF0000"))+ -->
+<!--   labs(title = "Wahlergebnis Briefwahl", -->
+<!--        x = "Partei", y = "Relatives Wahlergebnis") + -->
+<!--   theme_ipsum() + -->
+<!--   theme(title = element_text(hjust = 0.5)) -->
+<!-- ``` -->
+
+
+
+
+<!-- #Appendix -->
+<!-- ## RCS -->
+
+<!-- ### Overview 2017 -->
+<!-- ```{r} -->
+<!-- gles_rcs2017 %>% group_by(feldtag) %>% count() -->
+<!-- ``` -->
+
+
+
+<!-- ### Entwicklung der Briefwahl über Zeit -->
+
+<!-- Grafik zeigt den Anteil der Befragten, die bereits per Briefwahl abgestimmt haben, bis zum Wahltag (in Wochen vor der Wahl.) -->
+
+
+<!-- ```{r} -->
+<!-- ggplot(brief_zeit)+ -->
+<!--   aes(x = field_weeks, y = brief, group = 1)+ -->
+<!--   geom_line()+ -->
+<!--   geom_point()+ -->
+<!--   scale_y_continuous(labels = scales::percent_format()) -->
+<!-- ``` -->
+
+<!-- ### Parteienentwicklung innerhalb der Briefwähler -->
+
+<!-- In Wochen vor der Wahl, Entwicklung des Parteiergebnisses unter den Briefwählern. CDU verliert bei den Briefwählern, je näher der Wahltag rückt. SPD gewinnt. -->
+<!-- Allerdings relativ wenig robust, gerade zu Anfang geringes N an NW. -->
+
+<!-- ```{r} -->
+<!-- parteien_zeit %>%  -->
+<!--   dplyr::select(field_weeks, cdu_csu_mean:af_d_mean) %>%  -->
+<!--   pivot_longer(cdu_csu_mean:af_d_mean, names_to = "party") %>%  -->
+<!--   mutate(party = str_remove(party, "_mean")) %>%  -->
+<!--   ggplot()+ -->
+<!--   aes(x = field_weeks, y = value, color = party, group = party)+ -->
+<!--   geom_line()+ -->
+<!--   geom_point()+ -->
+<!--   scale_color_manual(values = c("af_d" = "#009ee0", -->
+<!--                                 "cdu_csu" = "#000000", -->
+<!--                                 "fdp" = "#00FF00", -->
+<!--                                 "gruene" = "#64a12d", -->
+<!--                                 "linke" = "#BE3075", -->
+<!--                                 "spd" = "#FF0000"))+ -->
+<!--   scale_y_continuous(labels = scales::percent_format()) -->
+<!-- ``` -->
